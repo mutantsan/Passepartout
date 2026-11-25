@@ -1,0 +1,21 @@
+## Interface: 16001
+## Title: |cffc9a25aPassepartout|r
+## Notes: Suggests which zone to quest in next, based on the quests you've done and the ones still open to you.
+## Author: mutantsan
+## Version: 1.0.0
+## X-License: MIT
+## Dependencies: Questie, QuestieDB
+## SavedVariables: PassepartoutDB
+## IconTexture: Interface\AddOns\Passepartout\media\icon
+## AddonCompartmentFunc: Passepartout_OnAddonCompartmentClick
+## Category-enUS: Quests
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
+
+Core.lua
+Analyzer.lua
+UI.lua
+Minimap.lua
