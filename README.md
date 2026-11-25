@@ -5,6 +5,8 @@
 Passepartout suggests which zone to quest in next in WoW Forever, based on the quests you've done and the ones
 still open to you.
 
+![Passepartout](media/preview.png)
+
 ## Features
 
 - **Where to go:** zones ranked for your level by the quests you can still do there, the experience they give,
