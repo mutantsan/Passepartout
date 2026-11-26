@@ -416,7 +416,7 @@ function Card:Bar(label, value, maxValue, right, color)
 	local l = self:FS(FONT, 11, self.pal.head)
 	l:SetText(label)
 	l:SetPoint("TOPLEFT", PAD, self.y)
-	l:SetWidth(INNER - 90)
+	l:SetWidth(INNER - 130)
 	local r = self:FS(FONT_NUM, 12, self.pal.muted)
 	r:SetJustifyH("RIGHT")
 	r:SetText(right)
@@ -1087,7 +1087,9 @@ function UI:Footer()
 	else
 		self.footLeft:SetText("")
 	end
-	self.footRight:SetText(r and format("%d zones checked", #r.zones) or "")
+	if not r then self.footRight:SetText("")
+	elseif self.tab == 2 then self.footRight:SetText(format("%d zones quested in", #r.history))
+	else self.footRight:SetText(format("%d zones checked", #r.zones)) end
 end
 
 function UI:UpdateProgress()
@@ -1274,30 +1276,40 @@ function UI:Upcoming(r)
 end
 
 function UI:Journey(r)
+	local done, total = 0, 0
+	for _, b in ipairs(r.history) do done, total = done + b.done, total + b.total end
+
 	local c = self:NewCard("parchment", "Interface\\Icons\\INV_Misc_Book_11")
 	c:Kicker("Quests so far", "from your completed quests")
 	c:Text(format("You've completed |cff6a3a05%s|r quests.", Num(r.completed)), 16, c.pal.head)
-	if r.avgDoneLevel then
-		local gap = r.level - r.avgDoneLevel
-		local note
-		if r.completed < 10 then note = "Just getting started."
-		elseif gap > 12 then note = "You've mostly levelled without quests, so there's a lot you've skipped."
-		else note = format("Their average level is %.0f. You're %d.", r.avgDoneLevel, r.level) end
-		c:Text(note, 12, c.pal.body)
+	local bits = {}
+	if total > 0 then
+		bits[#bits + 1] = format("That's %d%% of everything in the %d zones you've quested in.",
+			floor(done / total * 100), #r.history)
 	end
+	if #bits > 0 then c:Text(table.concat(bits, " "), 12, c.pal.body) end
 	c:Finish()
 
 	if #r.history == 0 then return end
 	local h = self:NewCard("dark", "Interface\\Icons\\INV_Misc_Map02")
-	h:Kicker("Zones", "most quests first")
-	local top = r.history[1].done
-	for i = 1, min(#r.history, 20) do
+	h:Kicker("Zones")
+	local key, limit = "history", 15
+	local expanded = UI.expanded[key]
+	for i = 1, expanded and #r.history or min(#r.history, limit) do
 		local b = r.history[i]
 		local pct = b.total > 0 and floor(b.done / b.total * 100) or 0
 		local color = pct >= 100 and { 0.30, 0.65, 0.25 } or C.bronze
-		h:Bar(b.name, b.done, top, format("%d done  \194\183  %d%%", b.done, pct), color)
+		-- The bar is how much of the zone is done, so it agrees with the percentage beside it.
+		h:Bar(b.name, b.done, b.total, format("%d of %d  \194\183  %d%%", b.done, b.total, pct), color)
 	end
-	h:Text("Percentages count only the quests your race and class can do. If you can only pick one of two quests, it counts once.", 10, h.pal.muted)
+	if #r.history > limit then
+		h:Link(expanded and "Show fewer" or format("Show all %d zones", #r.history), function()
+			UI.expanded[key] = not UI.expanded[key]
+			UI:Refresh(false)
+		end)
+	end
+	h:Space(4)
+	h:Text("Counts only quests your race and class can take. Holiday, profession and removed quests are left out, and either-or quests count once.", 10, h.pal.muted)
 	h:Finish()
 end
 

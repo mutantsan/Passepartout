@@ -254,8 +254,22 @@ local function Scan()
 	local Player, DB, XP = Q.Player, Q.DB, Q.XP
 	local completed, completedCount = CompletedSet()
 
+	-- Quests Questie hides (removed, unobtainable, internal flags) and holiday quests are left
+	-- out of everything. Quests Questie only keeps off the map are real and stay in.
+	local hidden = Q.Corrections and Q.Corrections.hiddenQuests or {}
+	local Event = Q.Event
+	local function Unlisted(id)
+		local h = hidden[id]
+		if h and h ~= "HIDE_ON_MAP" then return true end
+		if Event and Event.IsEventQuest then
+			local ok, ev = pcall(Event.IsEventQuest, id)
+			if ok and ev then return true end
+		end
+		return false
+	end
+
 	local zones, soon, leftovers = {}, {}, {}
-	local doneLevelSum, doneLevelN = 0, 0
+	local doneCount = 0
 	local ids = Qd.GetAllIds()
 	local total = #ids
 	local t0 = debugprofilestop()
@@ -270,7 +284,10 @@ local function Scan()
 
 		local special = Qd.specialFlags(id) or 0
 		local flags = Qd.questFlags(id) or 0
-		if special % 2 == 0 and (flags % (QUEST_FLAG_RAID * 2)) < QUEST_FLAG_RAID
+		local isDone = completed[id]
+		local skip = Unlisted(id)
+		if isDone and not skip then doneCount = doneCount + 1 end
+		if not skip and special % 2 == 0 and (flags % (QUEST_FLAG_RAID * 2)) < QUEST_FLAG_RAID
 			and Player.HasRequiredRace(Qd.requiredRaces(id)) and Player.HasRequiredClass(Qd.requiredClasses(id)) then
 
 			local area = ResolveZone(id)
@@ -281,12 +298,12 @@ local function Scan()
 			local key = id
 			if ex then for _, e in ipairs(ex) do if e < key then key = e end end end
 
-			if completed[id] then
+			if isDone then
 				if area then Bucket(zones, area).groups[key] = true end
-				doneLevelSum, doneLevelN = doneLevelSum + qLevel, doneLevelN + 1
 			elseif area and StarterFriendly(id, faction) then
 				local b = Bucket(zones, area)
-				if b.groups[key] == nil then b.groups[key] = false end
+				-- Open profession quests don't count against a zone's completion.
+				if b.groups[key] == nil and not Qd.requiredSkill(id) then b.groups[key] = false end
 				local req = Qd.requiredLevel(id) or 1
 				local maxReq = Qd.requiredMaxLevel(id) or 0
 				local diff = A.Difficulty(qLevel, level)
@@ -345,7 +362,8 @@ local function Scan()
 		b.groups = nil
 	end
 
-	return zones, soon, leftovers, completedCount, doneLevelN > 0 and doneLevelSum / doneLevelN or nil
+	-- Fall back to the raw count if Questie's tables weren't readable.
+	return zones, soon, leftovers, doneCount > 0 and doneCount or completedCount
 end
 
 -- Ranking ---------------------------------------------------------------------------
@@ -436,7 +454,7 @@ local function Reasons(b, level)
 	return r
 end
 
-function A:Build(zones, soon, leftovers, completedCount, avgDoneLevel)
+function A:Build(zones, soon, leftovers, completedCount)
 	local level = UnitLevel("player")
 	local Z = ns.Q.Zone
 
@@ -486,7 +504,6 @@ function A:Build(zones, soon, leftovers, completedCount, avgDoneLevel)
 		history = history,
 		byArea = zones,
 		completed = completedCount,
-		avgDoneLevel = avgDoneLevel,
 		time = time(),
 	}
 	self:Rerank()

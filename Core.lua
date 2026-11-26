@@ -37,6 +37,8 @@ function ns.Questie()
 				Zone = QuestieLoader:ImportModule("ZoneDB"),
 				Player = QuestieLoader:ImportModule("QuestiePlayer"),
 				Compat = QuestieLoader:ImportModule("QuestieCompat"),
+				Corrections = QuestieLoader:ImportModule("QuestieCorrections"),
+				Event = QuestieLoader:ImportModule("QuestieEvent"),
 			}
 		end)
 		if not ok then return nil end
