@@ -357,6 +357,8 @@ local function Percentile(sorted, p)
 end
 
 local function Summarize(b, level)
+	if b.summarized then return end
+	b.summarized = true
 	for _, q in ipairs(b.quests) do q.value = (q.xp or (level * 60)) * q.fit end
 	-- Of two mutually exclusive quests you can only do one: keep the better.
 	local byId = {}
@@ -417,6 +419,12 @@ local function Plural(n, one, many) return n == 1 and one or format(many, n) end
 local function Reasons(b, level)
 	local r = {}
 	if b.current then r[#r + 1] = "you're already here" end
+	if #b.quests == 0 then
+		if b.gray > 0 then r[#r + 1] = Plural(b.gray, "one quest left, but it's gray now", "%d quests left, but they're gray now") end
+		if b.done > 0 then r[#r + 1] = format("%d done here already", b.done) end
+		if #r == 1 then r[#r + 1] = "nothing left here at your level" end
+		return r
+	end
 	local y = b.colors.difficult
 	if y > 0 then r[#r + 1] = Plural(y, "one quest at your level", "%d quests at your level") end
 	if b.inLog > 0 then r[#r + 1] = Plural(b.inLog, "one already in your log", "%d already in your log") end
@@ -476,6 +484,7 @@ function A:Build(zones, soon, leftovers, completedCount, avgDoneLevel)
 		upcoming = upcoming,
 		leftovers = leftovers,
 		history = history,
+		byArea = zones,
 		completed = completedCount,
 		avgDoneLevel = avgDoneLevel,
 		time = time(),
@@ -502,6 +511,26 @@ function A:Rerank()
 		tsort(list, function(x, y) return x.score > y.score end)
 	end
 	r.current = current
+
+	-- Wherever you stand always gets a line, even when it didn't make the cut.
+	r.here, r.hereRank = nil, nil
+	if current and not IGNORED_ZONES[current] then
+		for i, b in ipairs(r.zones) do
+			if b.current then r.here, r.hereRank = b, i; break end
+		end
+		local okD, isDungeon = pcall(ns.Q.Zone.IsDungeonZone, current)
+		if not r.here and not (okD and isDungeon) then
+			local b = r.byArea and r.byArea[current]
+			if not b then
+				b = { area = current, quests = {}, total = 0, done = 0, gray = 0 }
+				if r.byArea then r.byArea[current] = b end
+			end
+			Summarize(b, r.level)
+			b.current, b.far, b.score = true, false, b.baseScore
+			b.reasons = Reasons(b, r.level)
+			r.here = b
+		end
+	end
 end
 
 -- Lifecycle --------------------------------------------------------------------------

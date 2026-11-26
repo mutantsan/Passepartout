@@ -1177,30 +1177,37 @@ function UI:Hero(r)
 	c:Finish()
 end
 
-function UI:Others(r)
-	if #r.zones < 2 then return end
-	local c = self:NewCard("dark", "Interface\\Icons\\INV_Misc_Spyglass_02")
-	c:Kicker("Other good zones", "by experience at your level")
-	for i = 2, min(#r.zones, OTHER_ZONES + 1) do
-		local b = r.zones[i]
-		if i > 2 then c:Space(6); c:Divider(); c:Space(10) end
-		local tag = ""
-		if b.current then tag = "  " .. Hex(C.log) .. "(you are here)|r"
-		elseif b.far then tag = "  " .. Hex(C.muted) .. "(other continent)|r" end
-		local title = c:FS(FONT, 14, C.light)
-		title:SetText(format("%s%d.|r  %s%s", Hex(C.bronze), i, b.name, tag))
-		title:SetPoint("TOPLEFT", PAD, c.y)
-		title:SetWidth(INNER - 70)
-		local map = c:Button("Map", function() UI.ShowOnMap(b.area) end, true)
-		map:SetWidth(60)
-		map:SetPoint("TOPRIGHT", -PAD, c.y + 3)
-		c:Space(20)
-		c:Text(StatLine(b, r), 11, C.summary, FONT_NUM, false)
-		local why = Sentence(b.reasons)
-		if why then c:Text(why, 11, c.pal.muted) end
+local function OtherZone(c, b, r, label, first)
+	if not first then c:Space(6); c:Divider(); c:Space(10) end
+	local tag = ""
+	if b.current then tag = "  " .. Hex(C.log) .. "(you are here)|r"
+	elseif b.far then tag = "  " .. Hex(C.muted) .. "(other continent)|r" end
+	local title = c:FS(FONT, 14, C.light)
+	title:SetText(format("%s%s|r  %s%s", Hex(C.bronze), label, b.name or "?", tag))
+	title:SetPoint("TOPLEFT", PAD, c.y)
+	title:SetWidth(INNER - 70)
+	local map = c:Button("Map", function() UI.ShowOnMap(b.area) end, true)
+	map:SetWidth(60)
+	map:SetPoint("TOPRIGHT", -PAD, c.y + 3)
+	c:Space(20)
+	if #b.quests > 0 then c:Text(StatLine(b, r), 11, C.summary, FONT_NUM, false) end
+	local why = Sentence(b.reasons or {})
+	if why then c:Text(why, 11, c.pal.muted) end
+	if #b.quests > 0 then
 		c:Ruler(b, r.level, false)
 		QuestList(c, b, QUESTS_SHOWN)
 	end
+end
+
+function UI:Others(r)
+	local shown = min(#r.zones, OTHER_ZONES + 1)
+	local here = r.here
+	if here and r.hereRank and r.hereRank <= shown then here = nil end
+	if shown < 2 and not here then return end
+	local c = self:NewCard("dark", "Interface\\Icons\\INV_Misc_Spyglass_02")
+	c:Kicker("Other good zones", "by experience at your level")
+	for i = 2, shown do OtherZone(c, r.zones[i], r, i .. ".", i == 2) end
+	if here then OtherZone(c, here, r, r.hereRank and (r.hereRank .. ".") or "\226\128\148", shown < 2) end
 	c:Finish()
 end
 
