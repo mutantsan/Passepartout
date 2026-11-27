@@ -24,16 +24,23 @@ local IGNORED_ZONES = { [2597] = true, [3277] = true, [3358] = true }
 
 -- Difficulty ---------------------------------------------------------------------
 
-local function GrayRange(level)
-	if UnitQuestTrivialLevelRange then
-		local ok, r = pcall(UnitQuestTrivialLevelRange, "player")
+-- How far below you a quest stays green (inclusive). Forever reports it directly; its generic
+-- GetQuestDifficultyColor uses other thresholds than the quest log, so it isn't used.
+local function GreenRange(level)
+	if C_QuestLog and C_QuestLog.GetTrivialRange then
+		local ok, r = pcall(C_QuestLog.GetTrivialRange)
 		if ok and type(r) == "number" and r > 0 then return r end
 	end
-	if level <= 5 then return 5 end
-	if level <= 39 then return 5 + floor(level / 10) end
-	if level <= 59 then return 1 + floor(level / 5) end
-	return 9
+	if GetQuestGreenRange then
+		local ok, r = pcall(GetQuestGreenRange)
+		if ok and type(r) == "number" and r > 0 then return r end
+	end
+	if level <= 5 then return 4 end
+	if level <= 39 then return 4 + floor(level / 10) end
+	if level <= 59 then return floor(level / 5) end
+	return 8
 end
+local GrayRange = function(level) return GreenRange(level) + 1 end
 
 -- trivial / standard (green) / difficult (yellow) / verydifficult (orange) / impossible (red)
 function A.Difficulty(questLevel, level)
@@ -41,8 +48,29 @@ function A.Difficulty(questLevel, level)
 	if d >= 5 then return "impossible" end
 	if d >= 3 then return "verydifficult" end
 	if d >= -2 then return "difficult" end
-	if -d < GrayRange(level) then return "standard" end
+	if -d <= GreenRange(level) then return "standard" end
 	return "trivial"
+end
+
+-- The quest's own difficulty as the client colours it, when it has the quest's data cached
+-- (uncached IDs report "Fair" whatever they are); otherwise the level rule above.
+local NATIVE = {}
+if Enum and Enum.RelativeContentDifficulty then
+	local E = Enum.RelativeContentDifficulty
+	for name, key in pairs({ Trivial = "trivial", Easy = "standard", Fair = "difficult",
+		Difficult = "verydifficult", Impossible = "impossible" }) do
+		if E[name] then NATIVE[E[name]] = key end
+	end
+end
+
+function A.QuestDifficulty(id, questLevel, level)
+	if id and C_PlayerInfo and C_PlayerInfo.GetContentDifficultyQuestForPlayer and HaveQuestData
+		and level == UnitLevel("player") and HaveQuestData(id) then
+		local ok, d = pcall(C_PlayerInfo.GetContentDifficultyQuestForPlayer, id)
+		local key = ok and NATIVE[d]
+		if key then return key end
+	end
+	return A.Difficulty(questLevel, level)
 end
 
 -- How much a quest's XP is worth per hour of play. Green quests are easier to complete (mobs
@@ -67,11 +95,40 @@ end
 
 local function Lib() return LibQuestieDB end
 
+-- Questie's own zone names cover areas the client can't name (Forever's new zones, such as
+-- Shen'dralas), and match what Questie shows. The client's name is the fallback.
+local questieZones
+local function QuestieZoneName(area)
+	local L = ns.Q and ns.Q.L10n
+	if not (L and type(L.zoneLookup) == "table") then return nil end
+	if not questieZones then
+		questieZones = {}
+		for _, zones in pairs(L.zoneLookup) do
+			if type(zones) == "table" then
+				for id, name in pairs(zones) do
+					if type(name) == "string" and questieZones[id] == nil then questieZones[id] = name end
+				end
+			end
+		end
+	end
+	local n = questieZones[area]
+	if n and getmetatable(L) and getmetatable(L).__call then
+		local ok, t = pcall(L, n)
+		if ok and type(t) == "string" and t ~= "" then n = t end
+	end
+	return n
+end
+
 local zoneNames = {}
 function A.ZoneName(area)
 	local n = zoneNames[area]
 	if n == nil then
-		n = (C_Map and C_Map.GetAreaInfo and C_Map.GetAreaInfo(area)) or false
+		n = QuestieZoneName(area)
+		if not n and C_Map and C_Map.GetAreaInfo then
+			local c = C_Map.GetAreaInfo(area)
+			n = (type(c) == "string" and c ~= "") and c or nil
+		end
+		n = n or false
 		if not n and ns.Q then
 			local ok, d = pcall(ns.Q.Zone.GetLocalizedDungeonName, ns.Q.Zone, area)
 			n = ok and d or false
@@ -239,10 +296,23 @@ end
 local function Bucket(t, area)
 	local b = t[area]
 	if not b then
-		b = { area = area, quests = {}, groups = {}, total = 0, done = 0, gray = 0 }
+		b = { area = area, quests = {}, groups = {}, open = {}, total = 0, done = 0, gray = 0 }
 		t[area] = b
 	end
 	return b
+end
+
+-- Why a quest you haven't done is still open, best first. An either/or group shows its most
+-- promising member.
+local STATUS_RANK = { available = 1, level = 2, hard = 3, locked = 4, gray = 5, aged = 6 }
+A.STATUS_RANK = STATUS_RANK
+
+local function Open(b, key, q)
+	local cur = b.open[key]
+	local qa, ca = q.inLog or false, cur and cur.inLog or false
+	if not cur or (qa and not ca) or (qa == ca and STATUS_RANK[q.status] < STATUS_RANK[cur.status]) then
+		b.open[key] = q
+	end
 end
 
 local function Scan()
@@ -303,14 +373,17 @@ local function Scan()
 			elseif area and StarterFriendly(id, faction) then
 				local b = Bucket(zones, area)
 				-- Open profession quests don't count against a zone's completion.
-				if b.groups[key] == nil and not Qd.requiredSkill(id) then b.groups[key] = false end
+				local counted = not Qd.requiredSkill(id)
+				if b.groups[key] == nil and counted then b.groups[key] = false end
 				local req = Qd.requiredLevel(id) or 1
 				local maxReq = Qd.requiredMaxLevel(id) or 0
-				local diff = A.Difficulty(qLevel, level)
+				local diff = A.QuestDifficulty(id, qLevel, level)
 				local inLog = InLog(id)
+				local status, entry
 				if maxReq > 0 and level > maxReq then
-					-- aged out
+					status = "aged"
 				elseif req > level then
+					status = "level"
 					if req <= level + 3 then
 						local ok, doable = pcall(DB.IsDoable, id)
 						if ok and doable then
@@ -319,6 +392,7 @@ local function Scan()
 						end
 					end
 				elseif diff == "trivial" then
+					status = "gray"
 					b.gray = b.gray + 1
 					if inLog then
 						-- Outlevelled but still in the log: free experience waiting to be handed in.
@@ -328,13 +402,17 @@ local function Scan()
 							xp = (ok and type(xp) == "number" and xp > 0) and xp or nil,
 						})
 					end
-				elseif diff ~= "impossible" then
+				elseif diff == "impossible" then
+					status = "hard"
+				else
+					status = "locked"
 					local doable = inLog
 					if not doable then
 						local ok, d = pcall(DB.IsDoable, id)
 						doable = ok and d
 					end
 					if doable then
+						status = "available"
 						local lo, hi, elite = MobLevels(id, qLevel)
 						if not elite or includeElite then
 							local ok, xp = pcall(XP.GetQuestLogRewardXP, XP, id, false)
@@ -343,27 +421,70 @@ local function Scan()
 							if hi and hi > level + 3 then fit = fit * 0.5 end
 							if elite then fit = fit * 0.35 end
 							if inLog then fit = fit * 1.15 end
-							tinsert(b.quests, {
+							entry = {
 								id = id, level = qLevel, diff = diff, xp = xp, fit = fit, area = area, ex = ex,
 								mobLo = lo, mobHi = hi, elite = elite, inLog = inLog, ready = inLog and IsReady(id),
-							})
+							}
+							tinsert(b.quests, entry)
+						else
+							entry = { id = id, level = qLevel, diff = diff, area = area, elite = true, mobLo = lo, mobHi = hi }
 						end
 					end
+				end
+				if counted then
+					entry = entry or { id = id, level = qLevel, diff = diff, area = area, inLog = inLog,
+						ready = inLog and IsReady(id) or nil }
+					entry.status, entry.req = status, req
+					Open(b, key, entry)
 				end
 			end
 		end
 	end
 
 	for _, b in pairs(zones) do
-		for _, isDone in pairs(b.groups) do
+		local todo = {}
+		for key, isDone in pairs(b.groups) do
 			b.total = b.total + 1
-			if isDone then b.done = b.done + 1 end
+			if isDone then b.done = b.done + 1
+			elseif b.open[key] then todo[#todo + 1] = b.open[key] end
 		end
-		b.groups = nil
+		tsort(todo, function(x, y)
+			if (x.inLog or false) ~= (y.inLog or false) then return x.inLog or false end
+			if x.status ~= y.status then return STATUS_RANK[x.status] < STATUS_RANK[y.status] end
+			if x.level ~= y.level then return x.level < y.level end
+			return x.id < y.id
+		end)
+		for _, q in ipairs(todo) do
+			b.lvLo = b.lvLo and min(b.lvLo, q.level) or q.level
+			b.lvHi = b.lvHi and max(b.lvHi, q.level) or q.level
+		end
+		b.todo = todo
+		b.groups, b.open = nil, nil
+	end
+
+	-- Reward items are stored per item ("quests that reward this"); turn that around once.
+	if not A.rewards then
+		local I, rewards = L.Item, {}
+		t0 = debugprofilestop()
+		for _, item in ipairs(I.GetAllIds()) do
+			if debugprofilestop() - t0 > BUDGET_MS then
+				coroutine.yield()
+				t0 = debugprofilestop()
+			end
+			local qs = I.questRewards(item)
+			if qs then
+				for _, q in ipairs(qs) do
+					local list = rewards[q]
+					if not list then list = {}; rewards[q] = list end
+					list[#list + 1] = item
+				end
+			end
+		end
+		A.rewards = rewards
 	end
 
 	-- Fall back to the raw count if Questie's tables weren't readable.
-	return zones, soon, leftovers, doneCount > 0 and doneCount or completedCount
+	return zones, soon, leftovers, doneCount > 0 and doneCount or completedCount, completed
 end
 
 -- Ranking ---------------------------------------------------------------------------
@@ -454,13 +575,18 @@ local function Reasons(b, level)
 	return r
 end
 
-function A:Build(zones, soon, leftovers, completedCount)
+function A:Build(zones, soon, leftovers, completedCount, completedSet)
 	local level = UnitLevel("player")
 	local Z = ns.Q.Zone
 
-	local ranked, dungeons, history = {}, {}, {}
+	local ranked, dungeons, history, atlas = {}, {}, {}, {}
 	for area, b in pairs(zones) do
 		if b.done > 0 then history[#history + 1] = b end
+		if b.total > 0 then
+			atlas[#atlas + 1] = b
+			local okD, isDungeon = pcall(Z.IsDungeonZone, area)
+			b.isDungeon = okD and isDungeon or false
+		end
 		if #b.quests > 0 then
 			Summarize(b, level)
 			local okD, isDungeon = pcall(Z.IsDungeonZone, area)
@@ -472,8 +598,15 @@ function A:Build(zones, soon, leftovers, completedCount)
 			end
 		end
 	end
-	for _, b in ipairs(history) do b.name = b.name or A.ZoneName(b.area) end
+	for _, b in ipairs(atlas) do b.name = b.name or A.ZoneName(b.area) end
 	tsort(history, function(x, y) return x.done > y.done end)
+	-- Zones you haven't touched read like a road ahead: lowest quests first.
+	tsort(atlas, function(x, y)
+		if (x.done > 0) ~= (y.done > 0) then return x.done > 0 end
+		if x.done > 0 and x.done ~= y.done then return x.done > y.done end
+		if x.done == 0 and (x.lvLo or 99) ~= (y.lvLo or 99) then return (x.lvLo or 99) < (y.lvLo or 99) end
+		return x.name < y.name
+	end)
 
 	local upcoming = {}
 	for _, s in pairs(soon) do
@@ -502,7 +635,9 @@ function A:Build(zones, soon, leftovers, completedCount)
 		upcoming = upcoming,
 		leftovers = leftovers,
 		history = history,
+		atlas = atlas,
 		byArea = zones,
+		completedSet = completedSet or {},
 		completed = completedCount,
 		time = time(),
 	}

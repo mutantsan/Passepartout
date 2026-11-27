@@ -59,8 +59,8 @@ local function DiffColor(key)
 end
 -- The game's difficulty colours are made for dark backgrounds; on parchment they need ink.
 local DIFF_INK = {
-	impossible = { 0.70, 0.05, 0.05 }, verydifficult = { 0.78, 0.30, 0.02 }, difficult = { 0.55, 0.42, 0.00 },
-	standard = { 0.10, 0.45, 0.10 }, trivial = { 0.40, 0.37, 0.33 },
+	impossible = { 0.58, 0.03, 0.03 }, verydifficult = { 0.60, 0.22, 0.00 }, difficult = { 0.42, 0.31, 0.00 },
+	standard = { 0.04, 0.32, 0.04 }, trivial = { 0.32, 0.29, 0.26 },
 }
 local function InkColor(key, pal)
 	if pal and not pal.shadow then return DIFF_INK[key] or pal.body end
@@ -194,7 +194,7 @@ local function QuestTooltip(row)
 		end
 	end
 	GameTooltip:AddLine(" ")
-	GameTooltip:AddLine("|cffffd24aClick|r to show the zone on the map", 0.7, 0.7, 0.7)
+	GameTooltip:AddLine("|cffffd24aClick|r " .. (row.hint or "to show the zone on the map"), 0.7, 0.7, 0.7)
 	GameTooltip:AddLine("|cffffd24aShift-click|r to link it in chat", 0.7, 0.7, 0.7)
 	GameTooltip:Show()
 end
@@ -204,7 +204,7 @@ end
 local Card = {}
 local PAL = {
 	dark = { title = C.gold, head = { 1, 1, 1 }, body = { 0.86, 0.84, 0.78 }, muted = { 0.62, 0.60, 0.56 }, rule = { 0.55, 0.45, 0.25 }, shadow = true },
-	parchment = { title = { 0.40, 0.22, 0.02 }, head = { 0.18, 0.10, 0.02 }, body = { 0.24, 0.15, 0.07 }, muted = { 0.42, 0.32, 0.20 }, rule = { 0.45, 0.32, 0.15 }, shadow = false },
+	parchment = { title = { 0.40, 0.22, 0.02 }, head = { 0.18, 0.10, 0.02 }, body = { 0.24, 0.15, 0.07 }, muted = { 0.34, 0.25, 0.14 }, rule = { 0.45, 0.32, 0.15 }, shadow = false },
 }
 local BACKDROP = {
 	bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -548,7 +548,9 @@ function Card:NewRow()
 	end
 	local shadow = self.pal.shadow and 1 or 0
 	for _, fs in ipairs({ row.lvl, row.name, row.right }) do fs:SetShadowColor(0, 0, 0, shadow); fs:SetText("") end
-	row.quest = nil
+	row.quest, row.hint = nil, nil
+	row:SetHeight(ROW_H)
+	row.name:SetPoint("LEFT", 46, 0)
 	row.icon:Hide()
 	row:SetScript("OnEnter", nil)
 	row:SetScript("OnLeave", nil)
@@ -585,12 +587,15 @@ local function QuestClick(row)
 end
 
 -- A hoverable, clickable quest line: (icon) [level] name ... mobs / xp
-function Card:QuestRow(q, rightText)
+-- onClick replaces the default (show the zone on the map); hint is its tooltip wording.
+function Card:QuestRow(q, rightText, onClick, hint)
 	local row = self:NewRow()
-	row.quest = q
+	row.quest, row.hint = q, hint
 	row:SetScript("OnEnter", QuestTooltip)
 	row:SetScript("OnLeave", function() GameTooltip:Hide() end)
-	row:SetScript("OnClick", QuestClick)
+	row:SetScript("OnClick", onClick and function(rw)
+		if IsShiftKeyDown() then QuestClick(rw) else onClick(rw.quest) end
+	end or QuestClick)
 	-- Yellow "!" to pick up; "?" in your log, gold when ready to hand in, grey while in progress.
 	row.icon:SetTexture(q.inLog and ICON_ACTIVE or ICON_AVAILABLE)
 	row.icon:SetDesaturated(q.inLog and not q.ready or false)
@@ -927,8 +932,11 @@ function UI:OnUpdate(elapsed)
 		thumb:ClearAllPoints()
 		thumb:SetPoint("TOP", track, "TOP", 0, -(self.scrollCur / range) * (trackH - th))
 		track:Show()
+		self:ShiftCards(0)
 	else
 		track:Hide()
+		-- No scrollbar: give its gutter back so the margins match on both sides.
+		self:ShiftCards(floor((SCROLL_R - SCROLL_L) / 2))
 	end
 	if self.fadeStart then
 		local t = GetTime() - self.fadeStart
@@ -992,6 +1000,7 @@ end
 
 function UI:SelectTab(i)
 	self.tab = i
+	self.nav = nil
 	if self.tabsTemplated and PanelTemplates_SetTab then PanelTemplates_SetTab(self.frame, i) end
 	if PlaySound and SOUNDKIT then PlaySound(SOUNDKIT.IG_CHARACTER_INFO_TAB or 841) end
 	self.scrollTarget, self.scrollCur = 0, 0
@@ -1088,7 +1097,7 @@ function UI:Footer()
 		self.footLeft:SetText("")
 	end
 	if not r then self.footRight:SetText("")
-	elseif self.tab == 2 then self.footRight:SetText(format("%d zones quested in", #r.history))
+	elseif self.tab == 2 then self.footRight:SetText(format("%d of %d zones quested in", #r.history, #(r.atlas or {})))
 	else self.footRight:SetText(format("%d zones checked", #r.zones)) end
 end
 
@@ -1102,6 +1111,7 @@ function UI:Refresh(animate)
 	if not self.frame then return end
 	self.cardIdx = 0
 	self.progressFill = nil
+	self.itemsPending = false
 	self:Header()
 	local r = A.result
 
@@ -1275,42 +1285,603 @@ function UI:Upcoming(r)
 	c:Finish()
 end
 
+-- Journey: every zone, then a zone's open quests, then one quest. A small stack of pages
+-- on this tab; Back returns to where you were scrolled.
+
+function UI:Push(page)
+	self.nav = self.nav or {}
+	local top = self.nav[#self.nav]
+	if top then top.scroll = self.scrollTarget else self.overviewScroll = self.scrollTarget end
+	self.nav[#self.nav + 1] = page
+	self.scrollTarget, self.scrollCur = 0, 0
+	if PlaySound and SOUNDKIT then PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or 856) end
+	self:Refresh(true)
+end
+
+function UI:Pop()
+	if not (self.nav and #self.nav > 0) then return end
+	self.nav[#self.nav] = nil
+	local top = self.nav[#self.nav]
+	local y = (top and top.scroll) or (not top and self.overviewScroll) or 0
+	if PlaySound and SOUNDKIT then PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_OFF or 857) end
+	self:Refresh(false)
+	self.scrollTarget, self.scrollCur = y, y
+end
+
 function UI:Journey(r)
+	local top = self.nav and self.nav[#self.nav]
+	if top and top.quest then return self:QuestPage(r, top.quest, top.area) end
+	if top and top.zone then
+		local b = r.byArea and r.byArea[top.zone]
+		if b then return self:ZonePage(r, b) end
+		self.nav = nil
+	end
+	self:JourneyOverview(r)
+end
+
+local DUNGEON_TAG = "  " .. Hex(C.muted) .. "(dungeon)|r"
+
+local function ZoneBar(h, b)
+	local y0 = h.y
+	local row = h:NewRow()
+	h.y = y0
+	row:SetHeight(27)
+	row:SetPoint("TOPLEFT", PAD, y0 + 2)
+	row:SetScript("OnClick", function() UI:Push({ zone = b.area }) end)
+	row:SetScript("OnEnter", function(f)
+		GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+		GameTooltip:SetText(b.name, 1, 0.82, 0)
+		local left = b.total - b.done
+		GameTooltip:AddDoubleLine("Done", format("%d of %d", b.done, b.total), 0.8, 0.8, 0.8, 1, 1, 1)
+		if b.lvLo then GameTooltip:AddDoubleLine("Quests left, levels", Range(b.lvLo, b.lvHi), 0.8, 0.8, 0.8, 1, 1, 1) end
+		GameTooltip:AddLine(" ")
+		GameTooltip:AddLine(format("|cffffd24aClick|r to see the %d quest%s left", left, left == 1 and "" or "s"), 0.7, 0.7, 0.7)
+		GameTooltip:Show()
+	end)
+	row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	local label = b.name .. (b.isDungeon and DUNGEON_TAG or "")
+	if b.done > 0 then
+		local pct = floor(b.done / b.total * 100)
+		local color = pct >= 100 and { 0.30, 0.65, 0.25 } or C.bronze
+		-- The bar is how much of the zone is done, so it agrees with the percentage beside it.
+		h:Bar(label, b.done, b.total, format("%d of %d  \194\183  %d%%", b.done, b.total, pct), color)
+	else
+		local lv = b.lvLo and ("  \194\183  level " .. Range(b.lvLo, b.lvHi)) or ""
+		h:Bar(label, 0, b.total, format("%d quest%s%s", b.total, b.total == 1 and "" or "s", lv))
+	end
+end
+
+local function ZoneList(h, list, key, limit)
+	local expanded = UI.expanded[key]
+	for i = 1, expanded and #list or min(#list, limit) do ZoneBar(h, list[i]) end
+	if #list > limit then
+		h:Link(expanded and "Show fewer" or format("Show all %d zones", #list), function()
+			UI.expanded[key] = not UI.expanded[key]
+			UI:Refresh(false)
+		end)
+	end
+end
+
+function UI:JourneyOverview(r)
 	local done, total = 0, 0
 	for _, b in ipairs(r.history) do done, total = done + b.done, total + b.total end
 
 	local c = self:NewCard("parchment", "Interface\\Icons\\INV_Misc_Book_11")
 	c:Kicker("Quests so far", "from your completed quests")
 	c:Text(format("You've completed |cff6a3a05%s|r quests.", Num(r.completed)), 16, c.pal.head)
-	local bits = {}
 	if total > 0 then
-		bits[#bits + 1] = format("That's %d%% of everything in the %d zones you've quested in.",
-			floor(done / total * 100), #r.history)
+		c:Text(format("That's %d%% of everything in the %d zones you've quested in.",
+			floor(done / total * 100), #r.history), 12, c.pal.body)
 	end
-	if #bits > 0 then c:Text(table.concat(bits, " "), 12, c.pal.body) end
 	c:Finish()
 
-	if #r.history == 0 then return end
-	local h = self:NewCard("dark", "Interface\\Icons\\INV_Misc_Map02")
-	h:Kicker("Zones")
-	local key, limit = "history", 15
-	local expanded = UI.expanded[key]
-	for i = 1, expanded and #r.history or min(#r.history, limit) do
-		local b = r.history[i]
-		local pct = b.total > 0 and floor(b.done / b.total * 100) or 0
-		local color = pct >= 100 and { 0.30, 0.65, 0.25 } or C.bronze
-		-- The bar is how much of the zone is done, so it agrees with the percentage beside it.
-		h:Bar(b.name, b.done, b.total, format("%d of %d  \194\183  %d%%", b.done, b.total, pct), color)
+	local atlas = r.atlas or r.history
+	if #atlas == 0 then return end
+	local started, fresh = {}, {}
+	for _, b in ipairs(atlas) do
+		if b.done > 0 then started[#started + 1] = b else fresh[#fresh + 1] = b end
 	end
-	if #r.history > limit then
-		h:Link(expanded and "Show fewer" or format("Show all %d zones", #r.history), function()
-			UI.expanded[key] = not UI.expanded[key]
-			UI:Refresh(false)
-		end)
+	local h = self:NewCard("dark", "Interface\\Icons\\INV_Misc_Map02")
+	h:Kicker("Zones", "click one to see what's left")
+	if #started > 0 then
+		h:Kicker(format("Quested in  \194\183  %d", #started))
+		ZoneList(h, started, "history", 15)
+	end
+	if #fresh > 0 then
+		if #started > 0 then h:Space(6) end
+		h:Kicker(format("Not started yet  \194\183  %d", #fresh))
+		ZoneList(h, fresh, "fresh", 10)
 	end
 	h:Space(4)
 	h:Text("Counts only quests your race and class can take. Holiday, profession and removed quests are left out, and either-or quests count once.", 10, h.pal.muted)
 	h:Finish()
+end
+
+-- Zone page --------------------------------------------------------------------------
+
+local STATUS_GROUPS = {
+	{ "available", "You can do these now", "you can do now" },
+	{ "level", "Opening at a higher level", "open later" },
+	{ "hard", "Too hard for now", "too hard for now" },
+	{ "locked", "Not unlocked yet", "locked" },
+	{ "gray", "Gray now", "gray" },
+	{ "aged", "No longer offered", "no longer offered" },
+}
+local STATUS_FOLD = { gray = 5, aged = 5, locked = 12 }
+
+local function Prereqs(id)
+	local Qd = LibQuestieDB.Quest
+	return Qd.preQuestGroup(id), Qd.preQuestSingle(id)
+end
+
+-- Whether the quests a quest waits on are done: all of the group, any one of the singles.
+local function PrereqsMet(id, set)
+	local group, single = Prereqs(id)
+	if group then for _, p in ipairs(group) do if not set[p] then return false end end end
+	if single and #single > 0 then
+		for _, p in ipairs(single) do if set[p] then return true end end
+		return false
+	end
+	return true
+end
+
+local function RowNote(q, r)
+	local s = q.status
+	if q.ready then return "ready to hand in" end
+	if q.inLog then return "in your log" end
+	if s == "available" then
+		local bits = {}
+		if q.mobLo then bits[#bits + 1] = "mobs " .. Range(q.mobLo, q.mobHi) end
+		if q.xp then bits[#bits + 1] = Num(q.xp) .. " xp" end
+		return table.concat(bits, "  \194\183  ")
+	elseif s == "level" then return "from level " .. (q.req or q.level)
+	elseif s == "locked" then
+		if not PrereqsMet(q.id, r.completedSet) then return "needs an earlier quest" end
+		if LibQuestieDB.Quest.requiredMinRep(q.id) then return "needs reputation" end
+		return ""
+	end
+	return ""
+end
+
+local function OpenQuest(q) UI:Push({ quest = q.id, area = q.area }) end
+
+function UI:ZonePage(r, b)
+	local todo = b.todo or {}
+	local c = self:NewCard("parchment", b.isDungeon and "Interface\\Icons\\INV_Misc_Key_10" or "Interface\\Icons\\INV_Misc_Map_01")
+	if not b.isDungeon then c:Poster(A.UiMapId(b.area), 170) end
+	c:Kicker(b.isDungeon and "Dungeon" or "Zone", b.current and "you are here" or (b.done > 0 and "quested in" or "not started yet"))
+	c:Button("< All zones", function() UI:Pop() end)
+	c:Space(30)
+	c:Text(b.name or A.ZoneName(b.area), 24, c.pal.head, FONT, false)
+	local pct = b.total > 0 and floor(b.done / b.total * 100) or 0
+	c:Bar(format("%d of %d done", b.done, b.total), b.done, b.total, format("%d%%", pct),
+		pct >= 100 and { 0.30, 0.65, 0.25 } or C.bronze)
+	local counts = {}
+	for _, q in ipairs(todo) do counts[q.status] = (counts[q.status] or 0) + 1 end
+	local bits = {}
+	for _, g in ipairs(STATUS_GROUPS) do
+		local n = counts[g[1]]
+		if n then bits[#bits + 1] = format("%d %s", n, g[3]) end
+	end
+	if #todo == 0 then
+		c:Text("Nothing left here. Every quest you can take in this zone is done.", 12, c.pal.body)
+	else
+		c:Text(format("%d quest%s left: %s.", #todo, #todo == 1 and "" or "s", table.concat(bits, ", ")), 12, c.pal.body)
+	end
+	c:Space(4)
+	c:Button("Show on map", function() UI.ShowOnMap(b.area) end)
+	c:Space(26)
+	c:Finish()
+
+	if #todo == 0 then return end
+	local h = self:NewCard("dark", "Interface\\Icons\\INV_Misc_Note_01")
+	h:Kicker("Quests left", "click one for details")
+	local first = true
+	for _, g in ipairs(STATUS_GROUPS) do
+		local list = {}
+		for _, q in ipairs(todo) do if q.status == g[1] then list[#list + 1] = q end end
+		if #list > 0 then
+			if not first then h:Space(6) end
+			first = false
+			h:Kicker(format("%s  \194\183  %d", g[2], #list))
+			local key = "zone:" .. b.area .. ":" .. g[1]
+			local limit = STATUS_FOLD[g[1]] or #list
+			local expanded = UI.expanded[key]
+			for i = 1, expanded and #list or min(limit, #list) do
+				h:QuestRow(list[i], RowNote(list[i], r), OpenQuest, "for details")
+			end
+			if #list > limit then
+				h:Link(expanded and "Show fewer" or format("Show all %d", #list), function()
+					UI.expanded[key] = not UI.expanded[key]
+					UI:Refresh(false)
+				end)
+			end
+		end
+	end
+	h:Finish()
+end
+
+-- Quest page -------------------------------------------------------------------------
+
+-- The quest's open entry: in the zone you came from first, then anywhere.
+local function FindOpen(r, id, area)
+	local b = area and r.byArea and r.byArea[area]
+	for _, q in ipairs(b and b.todo or {}) do if q.id == id then return q end end
+	for _, z in pairs(r.byArea or {}) do
+		for _, q in ipairs(z.todo or {}) do if q.id == id then return q end end
+	end
+end
+
+-- The first real spawn of an NPC or object, preferring its home zone: area, x, y (0-100).
+local function Spawn(kind, id)
+	local L = LibQuestieDB
+	local db = kind == 1 and L.Npc or kind == 2 and L.Object
+	local sp = db and db.spawns and db.spawns(id)
+	if type(sp) ~= "table" then return nil end
+	local function first(list)
+		for _, c in ipairs(list or {}) do
+			if type(c) == "table" and c[1] and c[2] and c[1] >= 0 and c[2] >= 0 then return c end
+		end
+	end
+	local home = db.zoneID and db.zoneID(id)
+	local c = home and first(sp[home])
+	if c then return home, c[1], c[2] end
+	for area, list in pairs(sp) do
+		c = first(list)
+		if c then return area, c[1], c[2] end
+	end
+end
+
+local function Places(t, kinds)
+	local out = {}
+	if type(t) ~= "table" then return out end
+	local L = LibQuestieDB
+	for _, kind in ipairs(kinds) do
+		local db = kind == 1 and L.Npc or kind == 2 and L.Object or L.Item
+		for _, id in ipairs(t[kind] or {}) do
+			local name = db and db.name(id)
+			if name then
+				local p = { name = kind == 3 and (name .. " (item)") or name }
+				if kind ~= 3 then p.area, p.x, p.y = Spawn(kind, id) end
+				p.area = p.area or (db.zoneID and db.zoneID(id)) or nil
+				if p.area == 0 then p.area = nil end
+				out[#out + 1] = p
+			end
+			if #out >= 3 then return out end
+		end
+	end
+	return out
+end
+
+-- Open the world map on a uiMap.
+local function OpenMap(uiMapId)
+	local Q = ns.Questie()
+	if Q and Q.Compat and Q.Compat.OpenWorldMap then
+		if not Q.Compat.OpenWorldMap(uiMapId) then ns.Print("The map can't open during combat.") end
+	elseif OpenWorldMap then
+		OpenWorldMap(uiMapId)
+	end
+end
+
+-- Drop the game's map pin (with the tracking arrow) on a spot and show it on the map.
+function UI.Pin(area, x, y, title)
+	local uiMapId = A.UiMapId(area)
+	if not uiMapId then return end
+	local placed = false
+	if C_Map.SetUserWaypoint and UiMapPoint and UiMapPoint.CreateFromCoordinates then
+		local can = not C_Map.CanSetUserWaypointOnMap or C_Map.CanSetUserWaypointOnMap(uiMapId)
+		if can then
+			placed = pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(uiMapId, x / 100, y / 100))
+			if placed and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
+				pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+			end
+		end
+	end
+	if not placed and TomTom and TomTom.AddWaypoint then
+		placed = pcall(TomTom.AddWaypoint, TomTom, uiMapId, x / 100, y / 100, { title = title })
+	end
+	OpenMap(uiMapId)
+	if placed then
+		ns.Print(format("Map pin set: %s, %s (%.1f, %.1f)", title, A.ZoneName(area), x, y))
+	else
+		ns.Print(format("%s is at %.1f, %.1f in %s.", title, x, y, A.ZoneName(area)))
+	end
+end
+
+-- A "Starts at" / "Hand in to" line; with a known spawn it pins it on the map.
+function Card:PlaceRow(prefix, p)
+	local row = self:NewRow()
+	row.name:SetPoint("LEFT", 0, 0)
+	local where = p.area and (", " .. A.ZoneName(p.area)) or ""
+	row.name:SetText(format("%s%s|r %s%s", Hex(self.pal.muted), prefix, p.name, where))
+	local nc = self.pal.head
+	row.name:SetTextColor(nc[1], nc[2], nc[3])
+	local mc = self.pal.muted
+	row.right:SetTextColor(mc[1], mc[2], mc[3])
+	if p.x then
+		row.right:SetText(format("%.0f, %.0f", p.x, p.y))
+		row:SetScript("OnClick", function() UI.Pin(p.area, p.x, p.y, p.name) end)
+		row:SetScript("OnEnter", function(f)
+			GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+			GameTooltip:SetText(p.name, 1, 0.82, 0)
+			GameTooltip:AddLine(format("%s  %.1f, %.1f", A.ZoneName(p.area), p.x, p.y), 0.8, 0.8, 0.8)
+			GameTooltip:AddLine(" ")
+			GameTooltip:AddLine("|cffffd24aClick|r to put a pin on the map", 0.7, 0.7, 0.7)
+			GameTooltip:Show()
+		end)
+		row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	end
+	row.name:SetWidth(max(60, INNER - row.right:GetStringWidth() - 10))
+	return row
+end
+
+-- The client only names factions you've met; these cover the rest of the old world.
+local FACTION_NAMES = {
+	[21] = "Booty Bay", [47] = "Ironforge", [54] = "Gnomeregan Exiles", [59] = "Thorium Brotherhood",
+	[68] = "Undercity", [69] = "Darnassus", [70] = "Syndicate", [72] = "Stormwind", [76] = "Orgrimmar",
+	[81] = "Thunder Bluff", [87] = "Bloodsail Buccaneers", [92] = "Gelkis Clan Centaur",
+	[93] = "Magram Clan Centaur", [270] = "Zandalar Tribe", [349] = "Ravenholdt", [369] = "Gadgetzan",
+	[470] = "Ratchet", [471] = "Wildhammer Clan", [509] = "The League of Arathor", [510] = "The Defilers",
+	[529] = "Argent Dawn", [530] = "Darkspear Trolls", [576] = "Timbermaw Hold", [577] = "Everlook",
+	[589] = "Wintersaber Trainers", [609] = "Cenarion Circle", [729] = "Frostwolf Clan",
+	[730] = "Stormpike Guard", [749] = "Hydraxian Waterlords", [809] = "Shen'dralar",
+	[889] = "Warsong Outriders", [890] = "Silverwing Sentinels", [909] = "Darkmoon Faire",
+	[910] = "Brood of Nozdormu",
+}
+
+local function FactionName(fid)
+	if C_Reputation and C_Reputation.GetFactionDataByID then
+		local ok, d = pcall(C_Reputation.GetFactionDataByID, fid)
+		if ok and d and d.name and d.name ~= "" then return d.name end
+	end
+	if GetFactionInfoByID then
+		local ok, n = pcall(GetFactionInfoByID, fid)
+		if ok and n and n ~= "" then return n end
+	end
+	return FACTION_NAMES[fid] or ("faction " .. fid)
+end
+
+local function StatusLine(q, r, id, level)
+	local set = r.completedSet
+	if set[id] then return "You've done this one.", DIFF_INK.standard end
+	if not q then return nil end
+	if q.ready then return "Ready to hand in.", DIFF_INK.standard end
+	if q.inLog then return "In your quest log.", DIFF_INK.difficult end
+	local s = q.status
+	if s == "available" then
+		return q.elite and "You can pick this up now. It's elite: bring a group." or "You can pick this up now.", DIFF_INK.standard
+	elseif s == "level" then
+		return format("Opens at level %d.", q.req or q.level), nil
+	elseif s == "hard" then
+		return format("Red at your level. It turns yellow around level %d.", q.level - 4), DIFF_INK.impossible
+	elseif s == "gray" then
+		return "Gray now: little experience left in it, but it still counts toward the zone.", DIFF_INK.trivial
+	elseif s == "aged" then
+		return "No longer offered at your level.", DIFF_INK.trivial
+	elseif s == "locked" then
+		if not PrereqsMet(id, set) then return "Not unlocked yet: it needs an earlier quest (below).", DIFF_INK.verydifficult end
+		local rep = LibQuestieDB.Quest.requiredMinRep(id)
+		if rep and rep[1] then return format("Not unlocked yet: it needs reputation with %s.", FactionName(rep[1])), DIFF_INK.verydifficult end
+		return "Not offered to you yet. Questie says something else unlocks it first.", DIFF_INK.verydifficult
+	end
+	return nil
+end
+
+local GetItemInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+local GetItemInfoInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+local GetItemQualityByID = (C_Item and C_Item.GetItemQualityByID) or GetItemQualityByID
+
+local QUALITY_INK = {
+	[2] = { 0.03, 0.34, 0.00 }, [3] = { 0.00, 0.22, 0.52 }, [4] = { 0.40, 0.10, 0.60 }, [5] = { 0.62, 0.30, 0.00 },
+}
+
+-- An item line: icon, name in its quality colour; hover for the item tooltip, shift-click to link.
+function Card:ItemRow(item, rightText)
+	local row = self:NewRow()
+	local name, link, quality = GetItemInfo(item)
+	if not name then
+		name = LibQuestieDB.Item.name(item) or ("Item " .. item)
+		quality = GetItemQualityByID and GetItemQualityByID(item)
+		UI.itemsPending = true
+	end
+	local icon = select(5, GetItemInfoInstant(item))
+	row.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+	row.icon:SetDesaturated(false)
+	row.icon:SetAlpha(1)
+	row.icon:Show()
+	local qc = quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[quality]
+	local nc = self.pal.head
+	-- Quality colours are made for dark backgrounds; on parchment they get a darker ink.
+	if qc and quality >= 2 then
+		nc = self.pal.shadow and { qc.r, qc.g, qc.b } or QUALITY_INK[quality] or nc
+	end
+	row.name:SetText(name)
+	row.name:SetTextColor(nc[1], nc[2], nc[3])
+	row.right:SetText(rightText or "")
+	local mc = self.pal.muted
+	row.right:SetTextColor(mc[1], mc[2], mc[3])
+	row.name:SetPoint("LEFT", 18, 0)
+	row.name:SetWidth(max(60, INNER - 22 - row.right:GetStringWidth() - 8))
+	row:SetScript("OnEnter", function(f)
+		GameTooltip:SetOwner(f, "ANCHOR_RIGHT")
+		GameTooltip:SetItemByID(item)
+		GameTooltip:Show()
+	end)
+	row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	row:SetScript("OnClick", function()
+		if not IsShiftKeyDown() then return end
+		local l = link or select(2, GetItemInfo(item))
+		if l and not (ChatEdit_InsertLink and ChatEdit_InsertLink(l)) and ChatFrame_OpenChat then ChatFrame_OpenChat(l) end
+	end)
+	return row
+end
+
+local function Money(copper)
+	if GetCoinTextureString then return GetCoinTextureString(copper) end
+	return format("%dg %ds %dc", floor(copper / 10000), floor(copper / 100) % 100, copper % 100)
+end
+
+function UI:QuestPage(r, id, area)
+	local Qd = LibQuestieDB.Quest
+	local level = r.level
+	local qLevel = Qd.questLevel(id) or 0
+	if qLevel <= 0 then qLevel = level end
+	local q = FindOpen(r, id, area)
+	if q and q.area then area = q.area end
+	local zoneName = area and A.ZoneName(area)
+
+	local c = self:NewCard("parchment", "Interface\\Icons\\INV_Misc_Note_06")
+	c:Kicker("Quest", zoneName)
+	local prev = self.nav and self.nav[#self.nav - 1]
+	local backTo = prev and (prev.zone and A.ZoneName(prev.zone) or (prev.quest and A:QuestName(prev.quest))) or "All zones"
+	local back = c:Button("< " .. backTo, function() UI:Pop() end)
+	if back:GetWidth() > INNER then back:SetWidth(INNER) end
+	c:Space(30)
+	local diff = (q and q.diff) or A.QuestDifficulty(id, qLevel, level)
+	local dc = InkColor(diff, c.pal)
+	c:Text(A:QuestName(id), 20, c.pal.head, FONT)
+	local facts = { format("%sLevel %d|r", Hex(dc), qLevel) }
+	local req = Qd.requiredLevel(id)
+	if req and req > 1 then facts[#facts + 1] = "requires " .. req end
+	local xp = q and q.xp
+	if not xp and ns.Q and ns.Q.XP then
+		local ok, v = pcall(ns.Q.XP.GetQuestLogRewardXP, ns.Q.XP, id, false)
+		xp = ok and type(v) == "number" and v > 0 and v or nil
+	end
+	if q and q.elite then facts[#facts + 1] = Hex(DIFF_INK.verydifficult) .. "Elite|r" end
+	c:Text(table.concat(facts, "   \194\183   "), 13, c.pal.body, FONT_NUM, false)
+	local status, sc = StatusLine(q, r, id, level)
+	if status then c:Text(status, 13, sc or c.pal.head) end
+
+	local text = Qd.objectivesText(id)
+	if type(text) == "table" and text[1] then
+		c:Kicker("Objectives")
+		for _, line in ipairs(text) do c:Text(line, 12, c.pal.body) end
+	end
+	local starts = Places(Qd.startedBy(id), { 1, 2, 3 })
+	local ends = Places(Qd.finishedBy(id), { 1, 2 })
+	if #starts > 0 or #ends > 0 then
+		c:Kicker("Where")
+		for _, p in ipairs(starts) do c:PlaceRow("Starts at", p) end
+		for _, p in ipairs(ends) do c:PlaceRow("Hand in to", p) end
+	end
+
+	-- The quests around this one: what it waits on and where it leads. Each opens its own page.
+	local function Linked(qid, note)
+		local lv = Qd.questLevel(qid) or 0
+		if lv <= 0 then lv = level end
+		local done = r.completedSet[qid]
+		c:QuestRow({ id = qid, level = lv, diff = A.QuestDifficulty(qid, lv, level), area = area },
+			done and "done" or note or "not done",
+			function(lq) UI:Push({ quest = lq.id, area = area }) end, "for details")
+	end
+	local group, single = Prereqs(id)
+	if (group and #group > 0) or (single and #single > 0) then
+		c:Kicker("Prequest")
+		for _, p in ipairs(group or {}) do Linked(p) end
+		if single and #single > 0 then
+			for _, p in ipairs(single) do Linked(p, #single > 1 and "any one of these" or nil) end
+		end
+	end
+	-- Rewards: items from QuestieDB, reputation from Questie, money only once it's in your log.
+	local items = A.rewards and A.rewards[id] or {}
+	-- Reputation straight from QuestieDB: Questie's own helper re-maps the amounts through a
+	-- later-expansion table, which loses old-world values on this client.
+	local reps = {}
+	local okR, raw = pcall(Qd.reputationReward, id)
+	if okR and type(raw) == "table" then
+		for _, rp in ipairs(raw) do
+			if type(rp) == "table" and rp[1] then reps[#reps + 1] = { rp[1], tonumber(rp[2]) } end
+		end
+	end
+	local money
+	if q and q.inLog and GetQuestLogRewardMoney then
+		local ok, m = pcall(GetQuestLogRewardMoney, id)
+		money = ok and type(m) == "number" and m > 0 and m or nil
+	end
+	if xp or #items > 0 or #reps > 0 or money then
+		c:Kicker("Rewards")
+		local line = {}
+		if xp then line[#line + 1] = Num(xp) .. " xp" end
+		if money then line[#line + 1] = Money(money) end
+		if #line > 0 then c:Text(table.concat(line, "   \194\183   "), 12, c.pal.body, FONT_NUM, false) end
+		local known = ns.Rewards and ns.Rewards.Get(id)
+		if known then
+			-- Seen in the game: exactly what you get and what you pick from.
+			if #known.given > 0 then
+				if #known.choice > 0 then c:Text("You get", 11, c.pal.muted) end
+				for _, item in ipairs(known.given) do c:ItemRow(item) end
+			end
+			if #known.choice > 0 then
+				c:Text(#known.choice > 1 and "Choose one of" or "You get", 11, c.pal.muted)
+				for _, item in ipairs(known.choice) do c:ItemRow(item) end
+			end
+		elseif #items > 0 then
+			for _, item in ipairs(items) do c:ItemRow(item) end
+			if #items > 1 then
+				-- Several pieces of gear are almost always a pick-one; anything else is a guess.
+				local gear = 0
+				for _, item in ipairs(items) do
+					local equip = select(4, GetItemInfoInstant(item))
+					if equip and equip ~= "" and equip ~= "INVTYPE_NON_EQUIP_IGNORE" and equip ~= "INVTYPE_BAG" then gear = gear + 1 end
+				end
+				local guess = gear == #items and "Probably a choice of one." or "Not sure yet whether you get all of these or pick one."
+				c:Text(guess .. " Open the quest at its giver once and Passepartout will know.", 10, c.pal.muted)
+			end
+		end
+		for _, rp in ipairs(reps) do
+			local v = rp[2]
+			if v and v ~= 0 then
+				c:Text(format("%s%d reputation with %s", v > 0 and "+" or "", v, FactionName(rp[1])), 12, c.pal.body)
+			else
+				c:Text("Reputation with " .. FactionName(rp[1]), 12, c.pal.body)
+			end
+		end
+	end
+
+	local nextId = Qd.nextQuestInChain(id)
+	local crumb = Qd.breadcrumbForQuestId(id)
+	if (nextId and nextId > 0) or (crumb and crumb > 0) then
+		c:Kicker("Leads to")
+		if nextId and nextId > 0 then Linked(nextId, "next in the chain") end
+		if crumb and crumb > 0 then Linked(crumb, "this sends you there") end
+	end
+
+	c:Space(8)
+	if area then
+		c:Button("Show on map", function() UI.ShowOnMap(area) end)
+	end
+	c:Button("Link in chat", function()
+		local ql = format("|cffffff00|Hquest:%d:%d|h[%s]|h|r", id, qLevel, A:QuestName(id))
+		if not (ChatEdit_InsertLink and ChatEdit_InsertLink(ql)) and ChatFrame_OpenChat then ChatFrame_OpenChat(ql) end
+	end, area ~= nil)
+	c:Space(26)
+	c:Finish()
+end
+
+-- Item names and colours arrive from the server a moment after first asked for.
+local itemWatch = CreateFrame("Frame")
+itemWatch:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+itemWatch:SetScript("OnEvent", function()
+	if not (UI.itemsPending and UI:IsShown()) or UI.itemRefreshQueued then return end
+	UI.itemRefreshQueued = true
+	C_Timer.After(0.2, function()
+		UI.itemRefreshQueued = false
+		local y = UI.scrollTarget
+		UI:Refresh(false)
+		UI.scrollTarget, UI.scrollCur = y, y
+	end)
+end)
+
+function UI:ShiftCards(x)
+	if self.cardX == x then return end
+	self.cardX = x
+	for i = 1, self.cardIdx do
+		local card = self.cards[i]
+		local _, _, _, _, y = card:GetPoint(1)
+		card:ClearAllPoints()
+		card:SetPoint("TOPLEFT", self.content, "TOPLEFT", x, y or 0)
+	end
 end
 
 function UI:Layout(animate)
@@ -1318,7 +1889,7 @@ function UI:Layout(animate)
 	for i = 1, self.cardIdx do
 		local card = self.cards[i]
 		card:ClearAllPoints()
-		card:SetPoint("TOPLEFT", self.content, "TOPLEFT", 0, -y)
+		card:SetPoint("TOPLEFT", self.content, "TOPLEFT", self.cardX or 0, -y)
 		y = y + card:GetHeight() + GAP
 		card:SetAlpha(animate and 0 or 1)
 	end

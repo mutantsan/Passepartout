@@ -39,6 +39,8 @@ function ns.Questie()
 				Compat = QuestieLoader:ImportModule("QuestieCompat"),
 				Corrections = QuestieLoader:ImportModule("QuestieCorrections"),
 				Event = QuestieLoader:ImportModule("QuestieEvent"),
+				Reputation = QuestieLoader:ImportModule("QuestieReputation"),
+				L10n = QuestieLoader:ImportModule("l10n"),
 			}
 		end)
 		if not ok then return nil end

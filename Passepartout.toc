@@ -2,7 +2,7 @@
 ## Title: |cffc9a25aPassepartout|r
 ## Notes: Suggests which zone to quest in next, based on the quests you've done and the ones still open to you.
 ## Author: mutantsan
-## Version: 1.1.0
+## Version: 1.2.0
 ## X-License: MIT
 ## Dependencies: Questie, QuestieDB
 ## SavedVariables: PassepartoutDB
@@ -17,5 +17,6 @@ Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 
 Core.lua
 Analyzer.lua
+Rewards.lua
 UI.lua
 Minimap.lua
